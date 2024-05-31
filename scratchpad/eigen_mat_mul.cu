@@ -188,9 +188,9 @@ void tiledMatrixMultiply(const Eigen::MatrixXd &A, const Eigen::MatrixXd &B, Eig
 
 // Util Func 3 - choleskyDecomposition
 
-__global__ void choleskyKernel(double *A, double *L, int n)
+__global__ void choleskyKernel(double *A, double *L, int n, int offset)
 {
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.x * blockDim.x + threadIdx.x + offset;
     if (j >= n)
         return;
 
@@ -207,7 +207,9 @@ __global__ void choleskyKernel(double *A, double *L, int n)
             }
             L[i + i * n] = sqrt(A[i + i * n] - sum);
         }
-        else if (j > i)
+        __syncthreads();
+
+        if (j > i)
         {
             double sum = 0.0;
             for (int k = 0; k < i; ++k)
@@ -241,12 +243,32 @@ void choleskyDecomposition(Eigen::MatrixXd &A, Eigen::MatrixXd &L)
     CUDA_CHECK_RETURN(cudaMemcpy(d_A, A.data(), size, cudaMemcpyHostToDevice));
 
     // Define block and grid sizes
-    int blockSize = 32;
+    int blockSize = 64;
     int gridSize = (n + blockSize - 1) / blockSize;
 
-    // Launch kernel
-    choleskyKernel<<<gridSize, blockSize>>>(d_A, d_L, n);
-    CUDA_CHECK_RETURN(cudaDeviceSynchronize());
+    int offset = 0;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+
+    while (offset <= n)
+    {
+        // Launch kernel
+        choleskyKernel<<<gridSize, blockSize>>>(d_A, d_L, n, offset);
+        CUDA_CHECK_RETURN(cudaDeviceSynchronize());
+        offset += blockSize;
+    }
+
+    cudaEventRecord(stop);
+
+    cudaEventSynchronize(stop);
+    float milliseconds = 0.0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    std::cout << "Elapsed time for cholesky size " << n << " elapsed: " << milliseconds << " ms\n";
 
     // Copy result back to host
     CUDA_CHECK_RETURN(cudaMemcpy(L.data(), d_L, size, cudaMemcpyDeviceToHost));
@@ -279,32 +301,47 @@ int main()
     matrixMultiply(A, B, C_t1);
     tiledMatrixMultiply(A, B, C_t2);
 
-    // std::cout << "A: "<< A<<std::endl;
-    // std::cout << "B: " << B << std::endl;
-    // std::cout << "C_t1 (Matrix Multiplication Result):\n" << C_t1 << std::endl;
-    // std::cout << "C_t2 (Tiled Matrix Multiplication Result):\n" << C_t2 << std::endl;
-    // std::cout << "C_t3 (Validation Result):\n" << C_t3 << std::endl;
-
     std::cout << "err 1: " << (C_t3 - C_t1).norm() << std::endl;
     std::cout << "err 2: " << (C_t3 - C_t2).norm() << std::endl;
 
     // Benchcase 2
     std::cout << "===================== BENCH CASE 2 ========================" << std::endl;
     // Initialize a positive-definite matrix
-    Eigen::MatrixXd A_2 = Eigen::MatrixXd::Random(16, 16);
-    A_2 = A_2.transpose() * A_2; // Make it symmetric positive-definite
+    Eigen::MatrixXd A_2_1 = Eigen::MatrixXd::Random(128, 128);
+    A_2_1 = A_2_1.transpose() * A_2_1; // Make it symmetric positive-definite
+
+    Eigen::MatrixXd A_2_2 = Eigen::MatrixXd::Random(256, 256);
+    A_2_2 = A_2_2.transpose() * A_2_2; // Make it symmetric positive-definite
+
+    Eigen::MatrixXd A_2_3 = Eigen::MatrixXd::Random(512, 512);
+    A_2_3 = A_2_3.transpose() * A_2_3; // Make it symmetric positive-definite
+
+    Eigen::MatrixXd A_2_4 = Eigen::MatrixXd::Random(1024, 1024);
+    A_2_4 = A_2_4.transpose() * A_2_4; // Make it symmetric positive-definite
 
     // Output matrix
-    Eigen::MatrixXd L(16, 16);
-    L.setZero();
+    Eigen::MatrixXd L_1(128, 128);
+    L_1.setZero();
+
+    Eigen::MatrixXd L_2(256, 256);
+    L_2.setZero();
+
+    Eigen::MatrixXd L_3(512, 512);
+    L_3.setZero();
+
+    Eigen::MatrixXd L_4(1024, 1024);
+    L_4.setZero();
 
     // Perform Cholesky decomposition
-    choleskyDecomposition(A_2, L);
+    choleskyDecomposition(A_2_1, L_1);
+    choleskyDecomposition(A_2_2, L_2);
+    choleskyDecomposition(A_2_3, L_3);
+    choleskyDecomposition(A_2_4, L_4);
 
-    std::cout << "Matrix A_2:\n"
-              << A_2 << std::endl;
-    std::cout << "Cholesky decomposition (L):\n"
-              << L << std::endl;
+    std::cout << "err size 128: " << (A_2_1 - L_1 * L_1.transpose()).norm() << std::endl;
+    std::cout << "err size 256: " << (A_2_2 - L_2 * L_2.transpose()).norm() << std::endl;
+    std::cout << "err size 512: " << (A_2_3 - L_3 * L_3.transpose()).norm() << std::endl;
+    std::cout << "err size 1024: " << (A_2_4 - L_4 * L_4.transpose()).norm() << std::endl;
 
     return 0;
 }
